@@ -83,10 +83,13 @@ trap cleanup EXIT INT TERM
 
 main() {
     echo ""
-    echo -e "${BLUE}╔═══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║   Claude Code Multi-Provider Proxy                           ║${NC}"
-    echo -e "${BLUE}║   GLM · Featherless · Google (Anthropic via separate key)    ║${NC}"
-    echo -e "${BLUE}╚═══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${MAGENTA}SYSTEM IDENTITY: ${NC}${RED}ˋ${NC}${YELLOW}𝐂𝐋𝐀𝐔𝐃𝐄${NC}${RED}ˊ${NC}"
+    echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}// INITIALIZING CUSTOM PARAMETERS...${NC}"
+    echo -e "${GREEN}// ACCESS GRANTED.${NC}"
+    echo ""
+    echo -e "  ${YELLOW}GLM · Featherless · Google · Anthropic${NC}"
     echo ""
 
     # Check providers
@@ -125,7 +128,7 @@ main() {
     echo -e "  ${GREEN}Featherless (Uncensored/Abliterated):${NC}"
     echo -e "    ${YELLOW}/model featherless/dphn/Dolphin-Mistral-24B-Venice-Edition${NC}           - Dolphin-3 (Security/RE)"
     echo -e "    ${YELLOW}/model featherless/huihui-ai/Qwen2.5-72B-Instruct-abliterated${NC}        - Qwen 2.5 72B (Best reasoning)"
-    echo -e "    ${YELLOW}/model featherless/WhiteRabbitNeo/WhiteRabbitNeo-V3-7B${NC}               - WhiteRabbitNeo V3 (Security/32K)"
+    echo -e "    ${YELLOW}/model featherless/WhiteRabbitNeo/WhiteRabbitNeo-V3-7B${NC}     - WhiteRabbitNeo V3 7B (Cybersecurity)"
     echo -e "    ${YELLOW}/model featherless/mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated${NC}   - Llama 3.1 8B (Fast)"
     echo -e "    ${YELLOW}/model featherless/huihui-ai/Llama-3.3-70B-Instruct-abliterated${NC}      - Llama 3.3 70B (Quality)"
     echo ""
@@ -139,12 +142,14 @@ main() {
     }
     echo ""
 
-    echo -e "${GREEN}Starting Claude Code with GLM-4.7...${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-    echo ""
-
     # Default to GLM-4.7 model
     DEFAULT_MODEL="glm/glm-4.7"
+
+    echo ""
+    echo -e "${MAGENTA}╔═══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${MAGENTA}║${NC}  ${GREEN}Active Model:${NC} ${YELLOW}${DEFAULT_MODEL}${NC}                              ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}╚═══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
 
     # Start with placeholder to prevent auth dialog, but use real key if provided
     if [ -n "$ANTHROPIC_API_KEY" ]; then
@@ -171,13 +176,13 @@ case "${1:-}" in
         ;;
     help|--help|-h)
         cat <<EOF
-${BLUE}Claude Code Multi-Provider Proxy${NC}
+${MAGENTA}CLAUDE${NC} ${RED}Multi-Provider Proxy${NC}
 
 ${GREEN}Usage:${NC}
   $0 [command]
 
 ${GREEN}Commands:${NC}
-  (none)   Start Claude Code with proxy
+  (none)   Start with GLM-4.7 (default)
   stop     Stop proxy server
   status   Check proxy status
   help     Show this help
@@ -205,7 +210,7 @@ ${GREEN}Model Switching:${NC}
   Featherless (Uncensored):
     /model featherless/dphn/Dolphin-Mistral-24B-Venice-Edition
     /model featherless/huihui-ai/Qwen2.5-72B-Instruct-abliterated
-    /model featherless/WhiteRabbitNeo/Llama-3-WhiteRabbitNeo-8B-v2.0
+    /model featherless/WhiteRabbitNeo/WhiteRabbitNeo-V3-7B
     /model featherless/mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated
     /model featherless/huihui-ai/Llama-3.3-70B-Instruct-abliterated
 

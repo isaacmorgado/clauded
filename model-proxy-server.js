@@ -1,19 +1,16 @@
 #!/usr/bin/env node
 /**
- * Multi-Provider Proxy Server for Claude Code
- * Enables GLM, Featherless.ai, Google Gemini, and Anthropic models with full tool support
+ * CLAUDE Multi-Provider Proxy Server
+ * Enables GLM, Featherless.ai, Google Gemini, and Anthropic models
  *
  * Features:
- * - Tool calling emulation for models without native support (abliterated models)
+ * - Tool calling emulation for abliterated models
+ * - Context length management per model
  * - Multiple provider support with automatic format translation
- * - Seamless integration with Claude Code's MCP tools
  *
  * Usage:
  *   node model-proxy-server.js [port]          # Start proxy server
  *   node model-proxy-server.js --gemini-login  # Login to Google via OAuth
- *
- * Then start Claude Code with:
- *   ANTHROPIC_BASE_URL=http://localhost:PORT claude
  *
  * Model Prefixes:
  *   glm/glm-4           -> GLM (ZhipuAI)
@@ -96,6 +93,36 @@ const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || '';
 const GOOGLE_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONTEXT COMPACTION CONFIGURATION
+// Enables smaller models (8k context) to work with Claude Code's large contexts
+// ═══════════════════════════════════════════════════════════════════════════
+const COMPACTION_CONFIG = {
+  // Enable/disable compaction (can be overridden per-model)
+  enabled: process.env.COMPACTION_ENABLED !== 'false',
+
+  // Number of recent messages to preserve verbatim (never summarized)
+  tailReserve: parseInt(process.env.COMPACTION_TAIL_RESERVE) || 6,
+
+  // Token budget reserved for model response
+  responseTokenReserve: parseInt(process.env.COMPACTION_RESPONSE_RESERVE) || 2048,
+
+  // Minimum tokens to retain after compaction
+  minContextTokens: parseInt(process.env.COMPACTION_MIN_CONTEXT) || 1024,
+
+  // Target ratio of context window to use (0.85 = 85%)
+  tokenBufferRatio: parseFloat(process.env.COMPACTION_BUFFER_RATIO) || 0.85,
+
+  // Maximum tokens for generated summaries
+  summaryMaxTokens: parseInt(process.env.COMPACTION_SUMMARY_TOKENS) || 512,
+
+  // Model to use for summarization (null = use same model)
+  summaryModel: process.env.COMPACTION_SUMMARY_MODEL || null,
+
+  // Enable logging of compaction actions
+  verbose: process.env.COMPACTION_VERBOSE === 'true'
+};
 
 // Models that support native tool calling
 const NATIVE_TOOL_CALLING_MODELS = [
@@ -344,7 +371,7 @@ const MODEL_LIMITS = {
   // Featherless models (verified and tested)
   'dphn/Dolphin-Mistral-24B-Venice-Edition': 4096,
   'huihui-ai/Qwen2.5-72B-Instruct-abliterated': 4096,
-  'WhiteRabbitNeo/WhiteRabbitNeo-V3-7B': 32768,  // V3 with 32K context (usable with Claude Code)
+  'WhiteRabbitNeo/WhiteRabbitNeo-V3-7B': 4096,  // WhiteRabbitNeo V3 7B (cybersecurity model)
   'mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated': 4096,  // Verified: 4096 max
   'huihui-ai/Llama-3.3-70B-Instruct-abliterated': 4096,  // Verified: 4096 max (not 8192!)
 
@@ -365,6 +392,323 @@ const MODEL_LIMITS = {
   // Default fallback
   'default': 4096
 };
+
+/**
+ * Model-specific CONTEXT limits (total tokens: input + output)
+ * This is different from max_tokens which is just output
+ */
+const MODEL_CONTEXT_LIMITS = {
+  // GLM models - 128k context
+  'glm-4.7': 131072,
+  'glm-4': 131072,
+  'glm-4-plus': 131072,
+  'glm-4-air': 131072,
+
+  // Featherless models - smaller context windows
+  'dphn/Dolphin-Mistral-24B-Venice-Edition': 32768,
+  'huihui-ai/Qwen2.5-72B-Instruct-abliterated': 32768,
+  'WhiteRabbitNeo/WhiteRabbitNeo-V3-7B': 8192,  // 8k context, cybersecurity model
+  'mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated': 8192,
+  'huihui-ai/Llama-3.3-70B-Instruct-abliterated': 131072,
+
+  // Google models - large context
+  'gemini-pro': 32768,
+  'gemini-1.5-pro': 1048576,
+  'gemini-2.0-flash': 1048576,
+  'gemini-2.0-flash-exp': 1048576,
+
+  // Anthropic models - 200k context
+  'claude-opus-4-5': 200000,
+  'claude-4.5-opus-20251101': 200000,
+  'claude-sonnet-4-5': 200000,
+  'claude-4.5-sonnet-20251001': 200000,
+  'claude-haiku-4-5': 200000,
+  'claude-haiku-4-5-20250919': 200000,
+
+  // Default fallback - conservative
+  'default': 8192
+};
+
+/**
+ * Estimate token count from text (rough: ~4 chars per token)
+ */
+function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Get context limit for a model
+ */
+function getContextLimit(modelName) {
+  const cleanModel = modelName.split('/').pop();
+
+  if (MODEL_CONTEXT_LIMITS[cleanModel]) {
+    return MODEL_CONTEXT_LIMITS[cleanModel];
+  }
+
+  for (const [key, limit] of Object.entries(MODEL_CONTEXT_LIMITS)) {
+    if (cleanModel.includes(key) || key.includes(cleanModel)) {
+      return limit;
+    }
+  }
+
+  return MODEL_CONTEXT_LIMITS['default'];
+}
+
+/**
+ * Check if request exceeds context limit
+ * Returns { ok: true } or { ok: false, estimated, limit, model }
+ */
+function checkContextLimit(anthropicBody) {
+  const model = anthropicBody.model || '';
+  const contextLimit = getContextLimit(model);
+
+  // Estimate total tokens
+  let totalTokens = 0;
+
+  // System prompt
+  if (anthropicBody.system) {
+    totalTokens += estimateTokens(anthropicBody.system);
+  }
+
+  // Messages
+  for (const msg of anthropicBody.messages || []) {
+    if (typeof msg.content === 'string') {
+      totalTokens += estimateTokens(msg.content);
+    } else if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'text') {
+          totalTokens += estimateTokens(block.text);
+        } else if (block.type === 'tool_result') {
+          totalTokens += estimateTokens(typeof block.content === 'string' ? block.content : JSON.stringify(block.content));
+        }
+      }
+    }
+  }
+
+  // Add buffer for output tokens
+  const maxTokens = anthropicBody.max_tokens || 4096;
+  totalTokens += maxTokens;
+
+  if (totalTokens > contextLimit) {
+    return {
+      ok: false,
+      estimated: totalTokens,
+      limit: contextLimit,
+      model: model
+    };
+  }
+
+  return { ok: true };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONTEXT COMPACTION FUNCTIONS
+// Automatically compress older messages when context exceeds model limits
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Extract text content from a message for summarization
+ */
+function extractMessageText(msg) {
+  if (typeof msg.content === 'string') {
+    return msg.content;
+  }
+  if (Array.isArray(msg.content)) {
+    return msg.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text)
+      .join('\n');
+  }
+  return '';
+}
+
+/**
+ * Create a summary of older messages using simple extraction
+ * (No external API call - uses heuristic summarization)
+ */
+function createLocalSummary(messages) {
+  if (!messages || messages.length === 0) {
+    return '[No previous context]';
+  }
+
+  const summaryParts = [];
+  let actionCount = 0;
+  let toolUseCount = 0;
+  let filesMentioned = new Set();
+  let keyTopics = new Set();
+
+  for (const msg of messages) {
+    const text = extractMessageText(msg);
+    const role = msg.role;
+
+    // Count tool uses
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'tool_use') {
+          toolUseCount++;
+          if (block.name) keyTopics.add(block.name);
+        }
+        if (block.type === 'tool_result') {
+          actionCount++;
+        }
+      }
+    }
+
+    // Extract file paths mentioned
+    const fileMatches = text.match(/(?:\/[\w\-\.\/]+\.\w+|[\w\-]+\.\w{1,4})/g);
+    if (fileMatches) {
+      fileMatches.slice(0, 5).forEach(f => filesMentioned.add(f));
+    }
+
+    // Extract key action words
+    const actionMatches = text.match(/(?:created?|modified?|updated?|deleted?|fixed?|added?|removed?|implemented?|tested?)/gi);
+    if (actionMatches) {
+      actionMatches.forEach(a => keyTopics.add(a.toLowerCase()));
+    }
+  }
+
+  // Build compact summary
+  summaryParts.push(`[COMPACTED CONTEXT: ${messages.length} messages]`);
+
+  if (toolUseCount > 0) {
+    summaryParts.push(`Tools used: ${toolUseCount}`);
+  }
+  if (actionCount > 0) {
+    summaryParts.push(`Actions completed: ${actionCount}`);
+  }
+  if (filesMentioned.size > 0) {
+    summaryParts.push(`Files: ${Array.from(filesMentioned).slice(0, 10).join(', ')}`);
+  }
+  if (keyTopics.size > 0) {
+    summaryParts.push(`Topics: ${Array.from(keyTopics).slice(0, 10).join(', ')}`);
+  }
+
+  // Add last user message snippet if available
+  const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+  if (lastUserMsg) {
+    const text = extractMessageText(lastUserMsg);
+    if (text.length > 0) {
+      const snippet = text.slice(0, 200).replace(/\n/g, ' ');
+      summaryParts.push(`Last request: "${snippet}${text.length > 200 ? '...' : ''}"`);
+    }
+  }
+
+  return summaryParts.join('\n');
+}
+
+/**
+ * Compact messages to fit within context limit
+ * Returns { messages, compacted: boolean, stats }
+ */
+function compactMessages(anthropicBody, contextLimit) {
+  const config = COMPACTION_CONFIG;
+  const messages = anthropicBody.messages || [];
+
+  if (!config.enabled || messages.length <= config.tailReserve) {
+    return {
+      messages,
+      compacted: false,
+      stats: { original: messages.length, final: messages.length, removed: 0 }
+    };
+  }
+
+  // Calculate available tokens
+  const systemTokens = estimateTokens(anthropicBody.system || '');
+  const maxTokens = anthropicBody.max_tokens || config.responseTokenReserve;
+  const availableTokens = Math.floor(contextLimit * config.tokenBufferRatio) - systemTokens - maxTokens;
+
+  // Estimate current message tokens
+  let currentTokens = 0;
+  const messageTokens = messages.map(msg => {
+    const tokens = estimateTokens(extractMessageText(msg));
+    currentTokens += tokens;
+    return tokens;
+  });
+
+  // Check if compaction needed
+  if (currentTokens <= availableTokens) {
+    return {
+      messages,
+      compacted: false,
+      stats: { original: messages.length, final: messages.length, removed: 0, tokens: currentTokens }
+    };
+  }
+
+  // Split messages: older (to summarize) and recent (to preserve)
+  const tailCount = Math.min(config.tailReserve, messages.length);
+  const olderMessages = messages.slice(0, -tailCount);
+  const recentMessages = messages.slice(-tailCount);
+
+  // Calculate how much we need to remove
+  const recentTokens = recentMessages.reduce((sum, msg) => sum + estimateTokens(extractMessageText(msg)), 0);
+  const targetOlderTokens = Math.max(availableTokens - recentTokens - config.summaryMaxTokens, config.minContextTokens);
+
+  // Progressive compaction: remove oldest messages until we fit
+  let olderTokens = olderMessages.reduce((sum, msg) => sum + estimateTokens(extractMessageText(msg)), 0);
+  let removedCount = 0;
+  const toSummarize = [];
+
+  while (olderTokens > targetOlderTokens && olderMessages.length > 0) {
+    const removed = olderMessages.shift();
+    toSummarize.push(removed);
+    olderTokens -= estimateTokens(extractMessageText(removed));
+    removedCount++;
+  }
+
+  // Create summary of removed messages
+  const summary = createLocalSummary(toSummarize);
+  const summaryMessage = {
+    role: 'user',
+    content: summary
+  };
+
+  // Reconstruct messages: summary + remaining older + recent
+  const compactedMessages = [summaryMessage, ...olderMessages, ...recentMessages];
+
+  if (config.verbose) {
+    log(`⚡ Compacted: ${messages.length} → ${compactedMessages.length} messages (removed ${removedCount})`, 'yellow');
+  }
+
+  return {
+    messages: compactedMessages,
+    compacted: true,
+    stats: {
+      original: messages.length,
+      final: compactedMessages.length,
+      removed: removedCount,
+      summarized: toSummarize.length,
+      originalTokens: currentTokens,
+      finalTokens: estimateTokens(summary) + olderTokens + recentTokens
+    }
+  };
+}
+
+/**
+ * Apply context compaction to an Anthropic request body
+ * Returns modified body and compaction stats
+ */
+function applyCompaction(anthropicBody, contextLimit) {
+  const result = compactMessages(anthropicBody, contextLimit);
+
+  if (result.compacted) {
+    return {
+      body: {
+        ...anthropicBody,
+        messages: result.messages
+      },
+      compacted: true,
+      stats: result.stats
+    };
+  }
+
+  return {
+    body: anthropicBody,
+    compacted: false,
+    stats: result.stats
+  };
+}
 
 /**
  * Get max_tokens limit for a model
@@ -701,12 +1045,50 @@ async function handleFeatherless(anthropicBody, res) {
   }
 
   const { model } = parseModel(anthropicBody.model);
+  const contextLimit = getContextLimit(anthropicBody.model);
+  let compactionStats = null;
+  let workingBody = anthropicBody;
+
+  // Apply context compaction if needed
+  const contextCheck = checkContextLimit(anthropicBody);
+  if (!contextCheck.ok) {
+    log(`⚡ Featherless: Context exceeds limit (~${contextCheck.estimated}/${contextCheck.limit}), applying compaction...`, 'yellow');
+
+    const compactionResult = applyCompaction(anthropicBody, contextLimit);
+    workingBody = compactionResult.body;
+    compactionStats = compactionResult.stats;
+
+    if (compactionResult.compacted) {
+      log(`⚡ Compacted: ${compactionStats.original} → ${compactionStats.final} messages (~${compactionStats.originalTokens} → ~${compactionStats.finalTokens} tokens)`, 'yellow');
+    }
+
+    // Verify compaction was sufficient
+    const recheckContext = checkContextLimit(workingBody);
+    if (!recheckContext.ok) {
+      const shortModel = model.split('/').pop();
+      log(`✗ Featherless: Context still too long after compaction (~${recheckContext.estimated}/${recheckContext.limit})`, 'red');
+      res.writeHead(400, {
+        'Content-Type': 'application/json',
+        'X-Proxy-Compaction-Attempted': 'true',
+        'X-Proxy-Compaction-Stats': JSON.stringify(compactionStats)
+      });
+      res.end(JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'context_length_exceeded',
+          message: `Context still too long for ${shortModel} after compaction. Estimated ~${recheckContext.estimated} tokens but limit is ${recheckContext.limit}. Try /clear or switch to a model with larger context (glm/glm-4.7).`
+        }
+      }));
+      return;
+    }
+  }
+
   // Featherless abliterated models always need tool emulation
-  const emulateTools = anthropicBody.tools && anthropicBody.tools.length > 0;
-  const openaiBody = anthropicToOpenAI(anthropicBody, emulateTools);
+  const emulateTools = workingBody.tools && workingBody.tools.length > 0;
+  const openaiBody = anthropicToOpenAI(workingBody, emulateTools);
   openaiBody.model = model;
 
-  log(`→ Featherless: ${model}${emulateTools ? ' (tool emulation)' : ''}`, 'magenta');
+  log(`→ Featherless: ${model}${emulateTools ? ' (tool emulation)' : ''}${compactionStats ? ' [compacted]' : ''}`, 'magenta');
 
   // LAYER 1: Rate limit check
   try {
@@ -747,9 +1129,22 @@ async function handleFeatherless(anthropicBody, res) {
     const openaiResponse = JSON.parse(response.body);
     const anthropicResponse = openaiToAnthropic(openaiResponse, emulateTools);
 
-    log(`← Featherless: ${anthropicResponse.usage.output_tokens} tokens`, 'green');
+    log(`← Featherless: ${anthropicResponse.usage.output_tokens} tokens${compactionStats ? ' [compacted]' : ''}`, 'green');
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    // Build response headers
+    const responseHeaders = { 'Content-Type': 'application/json' };
+    if (compactionStats) {
+      responseHeaders['X-Proxy-Context-Compacted'] = 'true';
+      responseHeaders['X-Proxy-Context-Original-Messages'] = String(compactionStats.original);
+      responseHeaders['X-Proxy-Context-Final-Messages'] = String(compactionStats.final);
+      responseHeaders['X-Proxy-Context-Removed'] = String(compactionStats.removed || 0);
+      if (compactionStats.originalTokens) {
+        responseHeaders['X-Proxy-Context-Original-Tokens'] = String(compactionStats.originalTokens);
+        responseHeaders['X-Proxy-Context-Final-Tokens'] = String(compactionStats.finalTokens);
+      }
+    }
+
+    res.writeHead(200, responseHeaders);
     res.end(JSON.stringify(anthropicResponse));
 
   } catch (error) {
@@ -1080,8 +1475,8 @@ function handleModelsList(res) {
     },
     {
       id: 'featherless/WhiteRabbitNeo/WhiteRabbitNeo-V3-7B',
-      name: 'WhiteRabbitNeo V3 7B (DeepHat)',
-      display_name: '🐰 WhiteRabbitNeo V3 (Security/32K Context)',
+      name: 'WhiteRabbitNeo V3 7B',
+      display_name: '🔐 WhiteRabbitNeo V3 7B (Cybersecurity)',
       created_at: '2024-01-01T00:00:00Z',
       type: 'model'
     },
@@ -1187,8 +1582,8 @@ const server = http.createServer(handleRequest);
 server.listen(PORT, '127.0.0.1', () => {
   console.log('');
   log('═'.repeat(70), 'bright');
-  log(`Multi-Provider Proxy Server for Claude Code`, 'bright');
-  log(`With Tool Calling Emulation for Abliterated Models`, 'bright');
+  log(`CLAUDE Multi-Provider Proxy`, 'bright');
+  log(`Tool Calling Emulation + Context Management`, 'bright');
   log('═'.repeat(70), 'bright');
   console.log('');
   log(`🚀 Server running on http://127.0.0.1:${PORT}`, 'green');
@@ -1210,8 +1605,12 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('');
   log('Features:', 'bright');
   log('  ✓ Tool calling emulation for abliterated models', 'green');
+  log('  ✓ Context compaction for small models (8k→works!)', 'green');
   log('  ✓ Seamless model switching with /model command', 'green');
   log('  ✓ Full MCP tool support across all providers', 'green');
+  if (COMPACTION_CONFIG.enabled) {
+    log(`  ⚡ Compaction: tail=${COMPACTION_CONFIG.tailReserve} msgs, buffer=${Math.round(COMPACTION_CONFIG.tokenBufferRatio*100)}%`, 'yellow');
+  }
   console.log('');
   log('Usage:', 'bright');
   log(`  # Start Claude Code with proxy:`, 'cyan');

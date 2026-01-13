@@ -29,13 +29,14 @@ clauded
 ### GLM (Z.AI) - 1 Model
 - `glm/glm-4.7` - Default orchestrator (8,192 tokens)
 
-### Featherless (Abliterated) - 4 Models
+### Featherless (Abliterated) - 5 Models
 - `featherless/dphn/Dolphin-Mistral-24B-Venice-Edition` - Security/RE (4,096 tokens)
 - `featherless/huihui-ai/Qwen2.5-72B-Instruct-abliterated` - Best reasoning (4,096 tokens)
+- `featherless/WhiteRabbitNeo/WhiteRabbitNeo-V3-7B` - Security/32K context (32,768 tokens)
 - `featherless/mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated` - Fast (4,096 tokens)
 - `featherless/huihui-ai/Llama-3.3-70B-Instruct-abliterated` - Quality (4,096 tokens)
 
-**Note:** WhiteRabbitNeo 8B removed due to 8K context limit (too small for Claude Code)
+**Note:** Upgraded to WhiteRabbitNeo V3 with 32K context (previous 8B v2 had insufficient 8K context)
 
 ## 🔧 Installation
 
@@ -99,6 +100,7 @@ Starts Claude Code with GLM-4.7 as the default model.
 # Featherless models
 /model featherless/dphn/Dolphin-Mistral-24B-Venice-Edition
 /model featherless/huihui-ai/Qwen2.5-72B-Instruct-abliterated
+/model featherless/WhiteRabbitNeo/WhiteRabbitNeo-V3-7B
 /model featherless/mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated
 /model featherless/huihui-ai/Llama-3.3-70B-Instruct-abliterated
 ```
@@ -219,5 +221,5 @@ MIT License - See LICENSE file
 ---
 
 **Status:** ✅ Production Ready
-**Models Working:** 5/5 (1 GLM + 4 Featherless)
+**Models Working:** 6/6 (1 GLM + 5 Featherless)
 **Last Updated:** 2026-01-12

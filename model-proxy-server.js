@@ -916,9 +916,9 @@ function openaiToAnthropic(openaiResponse, emulateTools = false) {
 }
 
 /**
- * Make HTTP/HTTPS request
+ * Make HTTP/HTTPS request with timeout
  */
-function makeRequest(url, options, body) {
+function makeRequest(url, options, body, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
     const protocol = parsedUrl.protocol === 'https:' ? https : http;
@@ -928,7 +928,8 @@ function makeRequest(url, options, body) {
       port: parsedUrl.port,
       path: parsedUrl.pathname + parsedUrl.search,
       method: options.method || 'POST',
-      headers: options.headers || {}
+      headers: options.headers || {},
+      timeout: timeoutMs
     };
 
     const req = protocol.request(reqOptions, (res) => {
@@ -949,6 +950,11 @@ function makeRequest(url, options, body) {
 
     req.on('error', (err) => {
       reject(err);
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error(`Request timeout after ${timeoutMs}ms`));
     });
 
     if (body) {

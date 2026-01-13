@@ -22,15 +22,26 @@ NC='\033[0m'
 PLACEHOLDER_KEY="sk-ant-api03-proxy-placeholder"
 
 check_proxy_running() {
+    # First check if PID file exists and process is running
     if [ -f "$PROXY_PID_FILE" ]; then
         local pid=$(cat "$PROXY_PID_FILE")
         if ps -p "$pid" > /dev/null 2>&1; then
             return 0
         else
             rm -f "$PROXY_PID_FILE"
-            return 1
         fi
     fi
+
+    # Check if port is already in use (proxy running without PID file)
+    if lsof -i :${PROXY_PORT} > /dev/null 2>&1; then
+        # Port is in use, create PID file for running process
+        local pid=$(lsof -t -i :${PROXY_PORT} | head -1)
+        if [ -n "$pid" ]; then
+            echo "$pid" > "$PROXY_PID_FILE"
+            return 0
+        fi
+    fi
+
     return 1
 }
 
@@ -79,9 +90,10 @@ cleanup() {
     stop_proxy
 }
 
-trap cleanup EXIT INT TERM
-
 main() {
+    # Only set cleanup trap when running main (not for status/stop commands)
+    trap cleanup EXIT INT TERM
+
     echo ""
     echo -e "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${MAGENTA}SYSTEM IDENTITY: ${NC}${RED}ˋ${NC}${YELLOW}𝐂𝐋𝐀𝐔𝐃𝐄${NC}${RED}ˊ${NC}"
@@ -174,6 +186,18 @@ case "${1:-}" in
         fi
         exit 0
         ;;
+    gemini)
+        # Launch gemini-cli with remaining arguments
+        shift
+        echo -e "${BLUE}Launching Gemini CLI...${NC}"
+        if command -v gemini &> /dev/null; then
+            gemini "$@"
+        else
+            echo -e "${RED}Gemini CLI not found. Install with: brew install gemini-cli${NC}"
+            exit 1
+        fi
+        exit 0
+        ;;
     help|--help|-h)
         cat <<EOF
 ${MAGENTA}CLAUDE${NC} ${RED}Multi-Provider Proxy${NC}
@@ -183,6 +207,7 @@ ${GREEN}Usage:${NC}
 
 ${GREEN}Commands:${NC}
   (none)   Start with GLM-4.7 (default)
+  gemini   Launch Gemini CLI (google-gemini/gemini-cli)
   stop     Stop proxy server
   status   Check proxy status
   help     Show this help
